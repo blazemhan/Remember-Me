@@ -1,0 +1,22 @@
+{
+  "name": "remember-me",
+  "version": "1.0.0",
+  "description": "Reconnect with old school mates through hints",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
+    "seed": "node seed.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "express": "^4.22.3",
+    "nodemailer": "^10.3.1"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
