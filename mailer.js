@@ -1,27 +1,40 @@
-// Email sending. Configure SMTP in a .env file (see .env.example).
-// If SMTP is not configured, emails are printed in the terminal instead (handy for testing).
-const nodemailer = require('nodemailer');
 
-const configured = !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
-const PORT = Number(process.env.SMTP_PORT || 587);
-const makeTransport = (port) => nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port,
-  secure: port === 465,                  // 465 = SSL from the start, 587 = STARTTLS
-  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  connectionTimeout: 15000, greetingTimeout: 10000, socketTimeout: 30000,
-  pool: true, maxConnections: 2,         // reuse one connection instead of reconnecting for every email
-});
-// Main port from .env, plus the other common port as a backup (some networks/ISPs block one of them)
-const transports = configured
-  ? [{ port: PORT, t: makeTransport(PORT) }].concat(PORT === 587 || PORT === 465 ? [{ port: PORT === 587 ? 465 : 587, t: makeTransport(PORT === 587 ? 465 : 587) }] : [])
-  : [];
-let preferred = 0;                       // remembers which port last worked
-const NETWORK_ERRORS = ['ETIMEDOUT', 'ECONNREFUSED', 'ECONNRESET', 'ESOCKET', 'ECONNECTION', 'EDNS', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'EHOSTUNREACH'];
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const FROM = process.env.MAIL_FROM || (configured ? `Remember Me <${process.env.SMTP_USER}>` : 'Remember Me <no-reply@localhost>');
+// Email sending through Brevo's HTTPS API.
+// If BREVO_API_KEY is not configured, emails are printed in the terminal
+// for local development and testing.
 
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const API_URL = 'https://api.brevo.com/v3/smtp/email';
+
+const configured = !!process.env.BREVO_API_KEY;
+
+// Supports both:
+// Remember Me <noreply@example.com>
+// noreply@example.com
+const FROM = process.env.MAIL_FROM || 'Remember Me <no-reply@localhost>';
+
+function parseSender(value) {
+  const match = value.match(/^\s*(.*?)\s*<([^<>]+)>\s*$/);
+
+  if (match) {
+    return {
+      name: match[1].replace(/^["']|["']$/g, '').trim() || 'Remember Me',
+      email: match[2].trim()
+    };
+  }
+
+  return {
+    name: 'Remember Me',
+    email: value.trim()
+  };
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;'
+}[c]));
 
 // Shared, email-client-safe layout (tables + inline styles)
 function layout({ heading, body, button, footer }) {
@@ -44,37 +57,56 @@ function layout({ heading, body, button, footer }) {
 
 async function send({ to, subject, html, text }) {
   if (!configured) {
-    console.log(`\n────────── 📧 EMAIL (SMTP not configured – not actually sent) ──────────
+    console.log(`\n────────── 📧 EMAIL (Brevo API not configured – not actually sent) ──────────
 To:      ${to}
 Subject: ${subject}
 
 ${text}
 ────────────────────────────────────────────────────────────────────────\n`);
+
     return true;
   }
-  // Up to 3 rounds; each round tries the working port first, then the backup port
-  let lastErr;
-  for (let round = 0; round < 3; round++) {
-    for (let k = 0; k < transports.length; k++) {
-      const i = (preferred + k) % transports.length;
-      try {
-        await transports[i].t.sendMail({ from: FROM, to, subject, html, text });
-        if (i !== preferred) console.log(`📧 Port ${transports[i].port} works better on this network – using it from now on.`);
-        preferred = i;
-        console.log(`📧 Sent "${subject}" → ${to}`);
-        return true;
-      } catch (err) {
-        lastErr = err;
-        const network = NETWORK_ERRORS.includes(err.code) || /timeout|timed out/i.test(err.message);
-        if (!network) { round = 99; break; }   // e.g. wrong password – retrying won't help
-      }
+
+  try {
+    const response = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'api-key': process.env.BREVO_API_KEY,
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        sender: parseSender(FROM),
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+        textContent: text
+      })
+    });
+
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      const message = result.message || result.code || `HTTP ${response.status}`;
+      throw new Error(message);
     }
-    if (round < 2) await sleep(round === 0 ? 3000 : 10000);
+
+    console.log(`📧 Sent "${subject}" → ${to}`);
+    console.log(`   Brevo message ID: ${result.messageId || 'Not provided'}`);
+
+    return true;
+
+  } catch (err) {
+    console.error(`❌ Email "${subject}" → ${to} FAILED: ${err.message}`);
+
+    if (err.message.includes('unauthorized') || err.message.includes('Key not found')) {
+      console.error('   → Check your BREVO_API_KEY in the environment variables.');
+    } else {
+      console.error('   → Check your Brevo API key, verified sender, and network connection.');
+    }
+
+    return false;
   }
-  console.error(`❌ Email "${subject}" → ${to} FAILED: ${lastErr.message}`);
-  if (lastErr.code === 'EAUTH') console.error('   → Check SMTP_USER / SMTP_PASS in .env (Gmail needs an App Password, not your normal password).');
-  else console.error('   → Could not reach the mail server. Check your internet, VPN, or antivirus/firewall "mail shield" blocking ports 587/465.');
-  return false;
 }
 
 module.exports = { send, layout, esc, configured };
