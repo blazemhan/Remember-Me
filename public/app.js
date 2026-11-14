@@ -228,6 +228,63 @@ function pageReset() {
     } catch (err) { showError(f, err.message); busy(f, false); }
   };
 }
+async function pageVerify() {
+  const params = new URLSearchParams(location.hash.split('?')[1] || '');
+  const token = params.get('token');
+
+  if (!token) {
+    $app.innerHTML = `
+      <div class="empty">
+        <h3>Invalid verification link</h3>
+        <p>The verification token is missing.</p>
+        <a class="btn btn-primary" href="#/">Go home</a>
+      </div>
+    `;
+    return;
+  }
+
+  $app.innerHTML = `
+    <div class="empty">
+      <h3>Verifying your email...</h3>
+      <p>Please wait.</p>
+    </div>
+  `;
+
+  try {
+    const response = await fetch('/api/verify-email', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ token })
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || 'Email verification failed.');
+    }
+
+    await refreshMe();
+
+    $app.innerHTML = `
+      <div class="empty">
+        <div class="big">✅</div>
+        <h3>Email verified successfully!</h3>
+        <p>Your account is now verified. You can access all features.</p>
+        <a class="btn btn-primary" href="#/dashboard">Go to dashboard</a>
+      </div>
+    `;
+  } catch (err) {
+    $app.innerHTML = `
+      <div class="empty">
+        <div class="big">⚠️</div>
+        <h3>${esc(err.message)}</h3>
+        <a class="btn btn-primary" href="#/">Go home</a>
+      </div>
+    `;
+  }
+}
 
 function pageSettings() {
   if (!requireLogin()) return;
@@ -278,14 +335,72 @@ function requireLogin() {
   toast('Please log in first'); go('#/login'); return false;
 }
 
-function pagePost() {
+
+async function pagePost() {
   if (!requireLogin()) return;
+  await refreshMe();
+
   const u = state.user;
+
+  // Block unverified users from accessing the posting form.
+  if (!Number(u.email_verified)) {
+    $app.innerHTML = `
+      <div class="narrow fade-in">
+        <div class="empty">
+          <div class="big">📧</div>
+          <h2>One quick step before posting</h2>
+          <p class="muted">
+            Please verify your email address before posting a memory.
+            You can still browse the board and look for old classmates.
+          </p>
+          <button class="btn btn-primary" id="resend-verification">
+            Resend verification email
+          </button>
+          <p style="margin-top:16px">
+            <a href="#/">Back to the board</a>
+          </p>
+        </div>
+      </div>
+    `;
+
+    document.getElementById('resend-verification').onclick = async (e) => {
+      const button = e.currentTarget;
+      button.disabled = true;
+      button.textContent = 'Sending...';
+
+      try {
+        const result = await api('/api/resend-verification', {
+          method: 'POST'
+        });
+
+        toast(
+          result.already_verified
+            ? 'Your email is already verified.'
+            : 'Verification email sent. Check your inbox!'
+        );
+      } catch (err) {
+        toast(err.message || 'Could not send verification email.');
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Resend verification email';
+      }
+    };
+
+    return;
+  }
+
+  // Verified users see the normal posting form.
   $app.innerHTML = `
     <div class="narrow fade-in">
       <span class="eyebrow">dear old friend…</span>
       <h1 class="page-title">Leave a hint</h1>
       <p class="muted" style="margin-top:-4px">Write something only <i>they</i> would recognise. Avoid full names, phone numbers or addresses — keep it a little mysterious.</p>
+      <div class="notice" style="margin-top:14px">
+  🔒 <b>A note about privacy:</b>
+  When someone responds to your hint and you accept their identity,
+  both of you will receive each other's registered email addresses
+  so you can reconnect.
+</div>
       <form id="f" class="panel" novalidate style="margin-top:22px">
         <div class="form-error"></div>
         <fieldset><legend>Where & when</legend>
@@ -314,15 +429,31 @@ function pagePost() {
         <div style="display:flex;gap:10px;justify-content:flex-end"><a class="btn btn-ghost" href="#/">Cancel</a><button class="btn btn-accent" type="submit">Pin it to the board 📌</button></div>
       </form>
     </div>`;
+
   const f = document.getElementById('f');
+
   f.onsubmit = async (e) => {
-    e.preventDefault(); busy(f, true);
-    try { const { id } = await api('/api/hints', { method: 'POST', body: formData(f) }); toast('Your hint is live!'); go('#/hint/' + id); }
-    catch (err) { showError(f, err.message); busy(f, false); f.scrollIntoView({ behavior: 'smooth' }); }
+    e.preventDefault();
+    busy(f, true);
+
+    try {
+      const { id } = await api('/api/hints', {
+        method: 'POST',
+        body: formData(f)
+      });
+
+      toast('Your hint is live!');
+      go('#/hint/' + id);
+    } catch (err) {
+      showError(f, err.message);
+      busy(f, false);
+      f.scrollIntoView({ behavior: 'smooth' });
+    }
   };
 }
 
 async function pageHint(id) {
+  if (state.user) await refreshMe();
   let data;
   try { data = await api('/api/hints/' + id); }
   catch { $app.innerHTML = `<div class="empty"><div class="big">🔍</div><h3>Hint not found</h3><a class="btn btn-primary" href="#/">Back to the board</a></div>`; return; }
@@ -333,7 +464,11 @@ async function pageHint(id) {
     side = `<h3>This is your hint</h3>
       <p class="muted">${h.response_count} ${h.response_count === 1 ? 'person has' : 'people have'} responded.</p>
       <a class="btn btn-primary" style="width:100%" href="#/dashboard">See responses</a>
-      <button class="btn btn-danger btn-sm" id="del" style="width:100%;margin-top:10px">Delete hint</button>`;
+     ${Number(state.user?.email_verified) ? `
+  <button class="btn btn-danger btn-sm" id="del" style="width:100%;margin-top:10px">Delete hint</button>
+` : `
+  <p class="muted">Verify your email to manage your hints.</p>
+`}`;
   } else if (h.status === 'reunited') {
     side = `<h3>🎉 Reunited!</h3><p class="muted">This hint has already found its person. Lovely.</p><a class="btn btn-ghost" href="#/">Browse more hints</a>`;
   } else if (!state.user) {
@@ -343,9 +478,25 @@ async function pageHint(id) {
   } else if (myResponse) {
     const chip = { pending: '<span class="chip yellow">⏳ Waiting for reply</span>', accepted: '<span class="chip green">✅ Accepted</span>', declined: '<span class="chip red">Not a match</span>' }[myResponse.status];
     side = `<h3>You responded</h3>${chip}<p class="muted" style="margin-top:12px">Check <a href="#/dashboard">My corner</a> for updates.</p>`;
-  } else {
+  }  else if (!Number(state.user.email_verified)) {
+    side = `
+      <h3>📧 One quick step before reconnecting</h3>
+      <p class="muted">
+        Please verify your email address before sending a reconnection request.
+        You can still browse hints and memories.
+      </p>
+      <button class="btn btn-primary" id="resend-verification" style="width:100%">
+        Resend verification email
+      </button>
+    `;}
+  else {
     side = `<h3>Is this about you?</h3><p class="muted">Send ${esc(h.author_name)} a note. They'll see your name and message, and decide whether to share contacts.</p>
-      <form id="rf" novalidate><div class="form-error"></div>
+    <div class="notice" style="margin:12px 0">
+  🔒 If ${esc(h.author_name)} accepts your response,
+  both of you will receive each other's registered email addresses
+  to continue your conversation.
+</div> 
+    <form id="rf" novalidate><div class="form-error"></div>
         ${h.question ? `<div class="secret">🔐 <b>Secret question:</b> ${esc(h.question)}</div>
         <div class="field"><label>Your answer</label><input name="answer" required maxlength="100" /></div>` : ''}
         <div class="field"><label>Your note</label><textarea name="message" required maxlength="1000" placeholder="It's me! I still remember…"></textarea></div>
@@ -372,6 +523,31 @@ async function pageHint(id) {
     </div>`;
 
   ['gate', 'gate2'].forEach((g) => { const el = document.getElementById(g); if (el) el.onclick = () => sessionStorage.setItem('next', '#/hint/' + h.id); });
+    const resendButton = document.getElementById('resend-verification');
+
+  if (resendButton) {
+    resendButton.onclick = async () => {
+      resendButton.disabled = true;
+      resendButton.textContent = 'Sending...';
+
+      try {
+        const result = await api('/api/resend-verification', {
+          method: 'POST'
+        });
+
+        toast(
+          result.already_verified
+            ? 'Your email is already verified.'
+            : 'Verification email sent. Check your inbox!'
+        );
+      } catch (err) {
+        toast(err.message || 'Could not send verification email.');
+      } finally {
+        resendButton.disabled = false;
+        resendButton.textContent = 'Resend verification email';
+      }
+    };
+  }
   const del = document.getElementById('del');
   if (del) del.onclick = async () => { if (!confirm('Delete this hint and all its responses?')) return; await api('/api/hints/' + h.id, { method: 'DELETE' }); toast('Hint deleted'); go('#/dashboard'); };
   const rf = document.getElementById('rf');
@@ -383,32 +559,63 @@ async function pageHint(id) {
 }
 
 async function pageDashboard() {
+  await refreshMe();
   if (!requireLogin()) return;
   const d = await api('/api/dashboard');
   state.pending = d.received.filter((r) => r.status === 'pending').length; renderNav();
   const tab = sessionStorage.getItem('tab') || (state.pending ? 'received' : 'hints');
-  const statusChip = (s) => ({ pending: '<span class="chip yellow">⏳ Pending</span>', accepted: '<span class="chip green">✅ Reconnected</span>', declined: '<span class="chip red">Not a match</span>' }[s]);
+  const needsVerification = !Number(state.user.email_verified);
 
+const verificationNotice = needsVerification ? `
+  <div class="item fade-in" style="margin: 1rem 0; border: 1px solid var(--accent);">
+    <h3>📧 Verify your email address</h3>
+    <p class="muted">
+      You can browse memories, but you need to verify your email
+      before posting hints or reconnecting with classmates.
+    </p>
+    <button class="btn btn-primary btn-sm" id="resend-verification">
+      Resend verification email
+    </button>
+  </div>
+` : '';
+  const statusChip = (s, hintStatus) => {
+  if (s === 'declined' && hintStatus === 'reunited') {
+    return '<span class="chip yellow">🎉 Reunited with someone else</span>';
+  }
+
+  return {
+    pending: '<span class="chip yellow">⏳ Pending</span>',
+    accepted: '<span class="chip green">✅ Reconnected</span>',
+    declined: '<span class="chip red">Not a match</span>'
+  }[s];
+};
   const views = {
     hints: () => d.myHints.length ? `<div class="grid">${d.myHints.map(hintCard).join('')}</div>`
       : `<div class="empty"><div class="big">✏️</div><h3>You haven't posted any hints</h3><p class="muted">Think of that one classmate you wish you'd kept in touch with.</p><a class="btn btn-accent" href="#/post">Post your first hint</a></div>`,
     received: () => d.received.length ? `<div class="list">${d.received.map((r) => `
       <div class="item fade-in">
         <div class="item-head"><div><h4>${esc(r.from_name)} ${r.from_school ? `<span class="muted" style="font:400 .85rem var(--sans)">· ${esc(r.from_school)}${r.from_year ? " '" + String(r.from_year).slice(-2) : ''}</span>` : ''}</h4>
-          <span class="muted" style="font-size:.85rem">on <a href="#/hint/${r.hint_id}">${esc(r.hint_title)}</a> · ${ago(r.created_at)}</span></div>${statusChip(r.status)}</div>
+          <span class="muted" style="font-size:.85rem">on <a href="#/hint/${r.hint_id}">${esc(r.hint_title)}</a> · ${ago(r.created_at)}</span></div>${statusChip(r.status, r.hint_status)}</div>
         ${r.answer_ok !== null ? `<div class="answer-check">${[
         `<span class="chip red">🔐 Didn't match your answer</span>`,
         `<span class="chip green">🔐 Secret answer correct</span>`,
         `<span class="chip yellow">🔐 Close match — you decide</span>`][r.answer_ok]}
           <span class="muted" style="font-size:.85rem">They wrote <b>“${esc(r.answer)}”</b>${r.my_answers ? ` · your answer: <b>“${esc(r.my_answers.join('” / “'))}”</b>` : ''}</span></div>` : ''}
         <p class="msg">${esc(r.message)}</p>
-        ${r.status === 'pending' ? `<div class="actions"><button class="btn btn-primary btn-sm" data-act="accept" data-id="${r.id}">Yes, it's them! Share contacts</button><button class="btn btn-ghost btn-sm" data-act="decline" data-id="${r.id}">Not them</button></div>` : ''}
-        ${r.status === 'accepted' ? `<div class="reveal">🎉 You're reconnected! Reach ${esc(r.from_name)} at <a href="mailto:${esc(r.from_email)}">${esc(r.from_email)}</a></div>` : ''}
+        ${r.status === 'pending' ? (
+  Number(state.user.email_verified)
+    ? `<div class="actions">
+        <button class="btn btn-primary btn-sm" data-act="accept" data-id="${r.id}">Yes, it's them! Share contacts</button>
+        <button class="btn btn-ghost btn-sm" data-act="decline" data-id="${r.id}">Not them</button>
+      </div>`
+    : `<p class="muted">📧 Verify your email before accepting or declining this reconnection request.</p>`
+) : ''}
+     ${r.status === 'accepted' ? `<div class="reveal">🎉 You're reconnected! Reach ${esc(r.from_name)} at <a href="mailto:${esc(r.from_email)}">${esc(r.from_email)}</a></div>` : ''}
       </div>`).join('')}</div>`
       : `<div class="empty"><div class="big">📬</div><h3>No responses yet</h3><p class="muted">When someone recognises your hint, their reply lands here.</p></div>`,
     sent: () => d.sent.length ? `<div class="list">${d.sent.map((s) => `
       <div class="item fade-in">
-        <div class="item-head"><div><h4><a href="#/hint/${s.hint_id}">${esc(s.hint_title)}</a></h4><span class="muted" style="font-size:.85rem">${esc(s.school)} · posted by ${esc(s.to_name)} · you replied ${ago(s.created_at)}</span></div>${statusChip(s.status)}</div>
+        <div class="item-head"><div><h4><a href="#/hint/${s.hint_id}">${esc(s.hint_title)}</a></h4><span class="muted" style="font-size:.85rem">${esc(s.school)} · posted by ${esc(s.to_name)} · you replied ${ago(s.created_at)}</span></div>${statusChip(s.status, s.hint_status)}</div>
         <p class="msg">${esc(s.message)}</p>
         ${s.status === 'accepted' ? `<div class="reveal">🎉 ${esc(s.to_name)} accepted! Say hello at <a href="mailto:${esc(s.to_email)}">${esc(s.to_email)}</a></div>` : ''}
       </div>`).join('')}</div>`
@@ -419,6 +626,7 @@ async function pageDashboard() {
     <div class="fade-in">
       <span class="eyebrow">hello, ${esc(state.user.name.split(' ')[0])}!</span>
       <h1 class="page-title">My corner</h1>
+      ${verificationNotice}
       <div class="tabs">
         <button class="tab" data-tab="hints">My hints (${d.myHints.length})</button>
         <button class="tab" data-tab="received">Responses to me ${state.pending ? `<span class="badge">${state.pending}</span>` : `(${d.received.length})`}</button>
@@ -426,6 +634,32 @@ async function pageDashboard() {
       </div>
       <div id="tabview"></div>
     </div>`;
+    const resendButton = document.getElementById('resend-verification');
+
+if (resendButton) {
+  resendButton.onclick = async () => {
+    resendButton.disabled = true;
+    resendButton.textContent = 'Sending...';
+
+    try {
+      const result = await api('/api/resend-verification', {
+        method: 'POST'
+      });
+
+      toast(
+        result.already_verified
+          ? 'Your email is already verified.'
+          : 'Verification email sent. Check your inbox!'
+      );
+
+    } catch (err) {
+      toast(err.message || 'Could not send verification email.');
+    } finally {
+      resendButton.disabled = false;
+      resendButton.textContent = 'Resend verification email';
+    }
+  };
+}
   const show = (t) => {
     sessionStorage.setItem('tab', t);
     document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === t));
@@ -434,7 +668,13 @@ async function pageDashboard() {
   document.querySelectorAll('.tab').forEach((b) => (b.onclick = () => show(b.dataset.tab)));
   document.getElementById('tabview').onclick = async (e) => {
     const b = e.target.closest('[data-act]'); if (!b) return;
-    if (b.dataset.act === 'accept' && !confirm('Share contact details with this person? Your hint will be marked as reunited.')) return;
+    if (
+  b.dataset.act === 'accept' &&
+  !confirm(
+    'Confirm this is the person you are looking for?\n\n' +
+    'Your hint will be marked as reunited, and both of you will receive each other’s registered email addresses.'
+  )
+) return;
     await api(`/api/responses/${b.dataset.id}/${b.dataset.act}`, { method: 'POST' });
     toast(b.dataset.act === 'accept' ? 'Reunited! 🎉' : 'Marked as not a match');
     sessionStorage.setItem('tab', 'received'); pageDashboard();
@@ -454,6 +694,7 @@ async function render() {
     if (route === '#/login') return state.user ? go('#/dashboard') : pageLogin();
     if (route === '#/forgot') return state.user ? go('#/settings') : pageForgot();
     if (route === '#/reset') return pageReset();
+    if (route === '#/verify') return await pageVerify();
     if (route === '#/settings') return pageSettings();
     if (route === '#/post') return pagePost();
     if (route === '#/dashboard') return await pageDashboard();
